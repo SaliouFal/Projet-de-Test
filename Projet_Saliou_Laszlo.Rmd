@@ -1,0 +1,908 @@
+---
+title: "Projet Apprentissage Statistique"
+author: "Saliou FALL, Laszlo SASS"
+date: "05 Janvier 2022"
+output: html_document
+---
+
+```{r setup,include=FALSE} 
+
+knitr::opts_chunk$set(warning=FALSE,message=FALSE)
+library(readxl)
+library(dplyr)
+library(zoo)
+library(ggplot2)
+library(ranger)
+library(gridExtra)
+library(robustHD)
+library(corrplot)
+library(gbm)
+library(mboost)
+library(mgcv)
+library(rpart)
+library(deepnet)
+
+
+
+```
+
+## Introduction
+
+---
+
+Nous travaillons sur des données de consommation Eolienne et Solaire sur la période 2013-2020.
+Notre but sera de prédire la consommation de 2020 en fonction des données antérieures.
+Nous disposons pour cela de variables météorologiques qui serviront à expliquer l'Eolien et le Solaire.
+
+Dans cette étude, nous nous sommes focalisés sur la consommation en Ile-de-France, et les valeurs météorologiques ont été mesurées à la station d'Orly.
+
+---
+
+```{r,echo=FALSE}
+
+library(readxl)
+library(dplyr)
+library(zoo)
+library(ggplot2)
+library(ranger)
+library(gridExtra)
+library(robustHD)
+library(corrplot)
+library(gbm)
+library(mboost)
+library(mgcv)
+library(rpart)
+library(deepnet)
+
+
+#Importation des données
+
+#La dernière ligne est vide, on la supprime
+
+data_1 <- read_xlsx('C:/Users/Prepaya/Documents/AppStat/data/Data_2013.xltx')[-35041,c(3,4,8,9)]
+data_2 <- read_xlsx('C:/Users/Prepaya/Documents/AppStat/data/Data_2014.xltx')[-35041,c(3,4,8,9)]
+data_3 <- read_xlsx('C:/Users/Prepaya/Documents/AppStat/data/Data_2015.xltx')[-35041,c(3,4,8,9)]
+data_4 <- read_xlsx('C:/Users/Prepaya/Documents/AppStat/data/Data_2016.xltx')[-35137,c(3,4,8,9)]
+data_5 <- read_xlsx('C:/Users/Prepaya/Documents/AppStat/data/Data_2017.xltx')[-35041,c(3,4,8,9)]
+data_6 <- read_xlsx('C:/Users/Prepaya/Documents/AppStat/data/Data_2018.xltx')[-35041,c(3,4,8,9)]
+data_7 <- read_xlsx('C:/Users/Prepaya/Documents/AppStat/data/Data_2019.xltx')[-35041,c(3,4,8,9)]
+data_8 <- read_xlsx('C:/Users/Prepaya/Documents/AppStat/data/Data_2020.xltx')[-35041,c(3,4,8,9)]   #test
+   #test
+
+#Conversion chr -> num de certaines colonnes 2013
+
+data_1$Eolien <- as.numeric(data_1$Eolien)
+data_1$Solaire <- as.numeric(data_1$Solaire)
+
+```
+
+
+
+```{r,echo=FALSE}
+
+#Dataset complet 2013-2020
+
+complete_data <- bind_rows(data_1,data_2,data_3,data_4,data_5,data_6,data_7,data_8)
+
+complete_data <- complete_data[seq(1,dim(complete_data)[1],12),]   #pas de temps : 3h (1/12 pour un pas de 15mn)
+
+complete_data <- complete_data %>% mutate(DateTime=as.POSIXct(paste0(substring(as.character(Date),1,10),' ', substring(as.character(Heures),12,16)),tz='UTC')) %>%
+  select(DateTime,Eolien,Solaire)
+
+complete_data <- complete_data[2:23368,]
+
+complete_data$Eolien <- na.approx(complete_data$Eolien,na.rm=FALSE)
+
+```
+
+## Analyse descriptive
+
+---
+
+On commence par visualiser les données.
+
+```{r,echo=FALSE}
+
+eol <- select(complete_data,DateTime,Eolien) %>% filter(DateTime < "2020-01-01 00:00:00 UTC")
+
+solar <- select(complete_data,DateTime,Solaire) %>% filter(DateTime < "2020-01-01 00:00:00 UTC")
+
+#Plot les données brutes
+
+g_1 <- ggplot(eol,aes(DateTime,Eolien)) +
+  geom_line(colour='blue') +
+  theme_classic()
+
+g_2 <- ggplot(solar,aes(DateTime,Solaire)) +
+  geom_line(colour="blue") +
+  theme_classic()
+
+grid.arrange(g_1,g_2,nrow=2)
+
+```
+
+Les paliers observés pour l'Eolien correspondent à des pics de saturation : on a atteint la production maximale possible compte tenu des installations en vigueur.
+
+Pour mieux les visualiser, nous appliquons une fonction de lissage exponentiel.
+
+```{r,echo=FALSE}
+
+#Fonction de lissage exponentiel
+
+exp_smooth <- function(vec, alpha){
+  if(alpha > 1 | alpha < 0){
+    return('alpha doit etre compris entre 0 et 1')
+  }else{
+    smth <- rep(NA,length(vec))
+    if( length(vec) > 0){
+      smth[1] <- vec[1]
+      if( length(vec) > 1){
+        for (i in 2:length(vec)){
+          smth[i] <- alpha*smth[i-1] + (1-alpha)*vec[i]
+        }
+      }
+    }
+    return(smth)
+  }
+}
+
+complete_data$Eolien <- exp_smooth(complete_data$Eolien,0.99)
+complete_data$Solaire <- exp_smooth(complete_data$Solaire,0.99)
+
+eol <- select(complete_data,DateTime,Eolien) %>% filter(DateTime < "2020-01-01 00:00:00 UTC")
+solar <- select(complete_data,DateTime,Solaire) %>% filter(DateTime < "2020-01-01 00:00:00 UTC")
+
+#Plot les données lissées
+
+g_1 <- ggplot(eol,aes(DateTime,Eolien)) +
+  geom_line(colour='blue') +
+  theme_classic()
+
+g_2 <- ggplot(solar,aes(DateTime,Solaire)) +
+  geom_line(colour="blue") +
+  theme_classic()
+
+grid.arrange(g_1,g_2,nrow=2)
+
+```
+
+- La variable Eolien a une tendance croissante au cours du temps. Une saisonnalité annuelle est peut-être aussi présente, mais son amplitude est très variable et on ne la distingue pas clairement.
+
+- La variable Solaire croît mais légèrement, de façon visuellement linéaire. On voit bien le motif de saisonnalité qui se répète chaque année.
+
+En raison de la politique sur les énergies renouvelables, la puissance installée augmente : de nouvelles éoliennes sont contruites, de nouveaux panneaux photovoltaïques sont installés, ce qui explique la tendance (nous la détaillerons plus loin).
+
+---
+
+## Variables explicatives
+
+Notre objectif est de prédire les variables Eolien et Solaire pour l'année 2020. Nous commençons par choisir des variables explicatives parmi une liste de variables météorologiques.
+
+```{r,echo=FALSE}
+
+#On attribue les mêmes dates aux variables meteo
+
+rds <- readRDS('C:/Users/Prepaya/Documents/AppStat/data/meteo_proj.RDS')
+rds <- rds %>% filter(Station=="ORLY",DateTime %in% complete_data$DateTime) %>% distinct()
+
+eol <- filter(eol, DateTime %in% rds$DateTime)
+solar <- filter(solar, DateTime %in% rds$DateTime)
+
+#On calcule l'importance des variables explicatives parmi les variables avec peu de NA
+
+tree <- select(rds,DateTime,Temperature,Nebulosity,Humidity,pmer,tend,dd,ff,td,vv,nbas,pres,rafper,rr1,rr3)
+
+tree$Nebulosity <- na.approx(tree$Nebulosity, na.rm = FALSE)
+tree$vv <- na.approx(tree$vv, na.rm = FALSE)
+tree$nbas <- na.approx(tree$nbas, na.rm = FALSE)
+tree$rafper <- na.approx(tree$rafper, na.rm = FALSE)
+tree$rr1 <- na.approx(tree$rr1, na.rm = FALSE)
+tree$rr3 <- na.approx(tree$rr3, na.rm = FALSE)
+
+```
+
+```{r,echo=FALSE}
+
+#Pour Eolien
+
+mat_eol <- left_join(eol,tree,by="DateTime")
+mat_eol <- select(mat_eol,-DateTime)
+
+mcor <- cor(mat_eol)
+
+corrplot(mcor, type="upper", order="hclust", tl.col="black", tl.srt=45)
+
+#Pour Solaire
+
+mat_solar <- left_join(solar,tree,by="DateTime")
+mat_solar <- select(mat_solar,-DateTime)
+
+mcor <- cor(mat_solar)
+
+corrplot(mcor, type="upper", order="hclust", tl.col="black", tl.srt=45)
+
+```
+
+Ces matrices de corrélation visent à donner une première intuition des variables qui vont bien expliquer l'Eolien et le Solaire.
+
+Pour l'Eolien, on constate que les variables appelées Temperature, td (point de rosée), pmer (pression au niveau de la mer), pres (pression station), ff (vitesse du vent) et rafper (rafales) ont une corrélation supérieure à celle des autres variables.
+
+Pour le Solaire, ce sont plutôt les variables Temperature, td, Humidity, Nebulosity, nbas (nébulosité basse) et vv (visibilité horizontale).
+
+---
+
+Pour plus de précision, on calcule l'importance de chacune des variables explicatives via une forêt à 100 arbres.
+
+```{r,echo=FALSE}
+
+#Représentation sous forme de barplots
+
+tree <- tree %>% filter(DateTime %in% eol$DateTime) %>% select(-DateTime)
+
+rf_eol <- ranger(eol$Eolien ~., tree, num.trees=100, importance='permutation')
+
+df1 <- data.frame(variable = colnames(tree), importance = rf_eol$variable.importance)
+
+g_1 <- ggplot(df1,aes(x=variable,y=importance)) +
+  geom_bar(stat="identity") +
+  geom_hline(yintercept=6.5,col="red") + ggtitle("Eolien")
+  coord_flip()
+
+rf_solar <- ranger(solar$Solaire ~., tree, num.trees=100, importance='permutation')
+
+df2 <- data.frame(variable = colnames(tree), importance = rf_solar$variable.importance)
+
+g_2 <- ggplot(df2,aes(x=variable,y=importance)) +
+  geom_bar(stat="identity") +
+  geom_hline(yintercept=1.2,col="red") + ggtitle("Solaire")
+  coord_flip()
+
+grid.arrange(g_1,g_2,nrow=2)
+
+```
+
+Les résultats diffèrent légèrement de ceux des matrices de corrélation, puisque nous retenons finalement Temperature, td, rafper, pres, pmer, Humidity et ff pour l'Eolien, et Temperature, td, pres, pmer, Nebulosity, Humidity et dd (direction du vent) pour le Solaire.
+
+---
+
+```{r,echo=FALSE}
+
+#Les variables retenues
+
+var_exp_eol <- data.frame(rds$DateTime,rds$Temperature,rds$Humidity,rds$pmer,rds$ff,rds$td,rds$pres,rds$rafper)
+colnames(var_exp_eol) <- c("DateTime","Temperature","Humidity","SeaLevelPressure","WindSpeed","DewPoint","StationPressure","WindGust")
+
+var_exp_eol <- var_exp_eol[-21525,]
+
+var_exp_solar <- data.frame(rds$DateTime,rds$Temperature,rds$Nebulosity,rds$Humidity,rds$pmer,rds$dd,rds$td,rds$pres)
+colnames(var_exp_solar) <- c("DateTime","Temperature","Nebulosity","Humidity","SeaLevelPressure","WindDirection","DewPoint","StationPressure")
+
+var_exp_solar <- var_exp_solar[-21525,]
+
+#Interpolation des donnees manquantes et lissage
+
+var_exp_eol$WindGust <- na.approx(var_exp_eol$WindGust, na.rm = FALSE)
+var_exp_solar$Nebulosity <- na.approx(var_exp_solar$Nebulosity, na.rm = FALSE)
+
+var_exp_eol$Temperature <- exp_smooth(var_exp_eol$Temperature,0.99)
+var_exp_eol$Humidity <- exp_smooth(var_exp_eol$Humidity,0.99)
+var_exp_eol$SeaLevelPressure <- exp_smooth(var_exp_eol$SeaLevelPressure,0.99)
+var_exp_eol$WindSpeed <- exp_smooth(var_exp_eol$WindSpeed,0.99)
+var_exp_eol$DewPoint <- exp_smooth(var_exp_eol$DewPoint,0.99)
+var_exp_eol$StationPressure <- exp_smooth(var_exp_eol$StationPressure,0.99)
+var_exp_eol$WindGust <- exp_smooth(var_exp_eol$WindGust,0.99)
+
+var_exp_solar$Temperature <- exp_smooth(var_exp_solar$Temperature,0.99)
+var_exp_solar$Nebulosity <- exp_smooth(var_exp_solar$Nebulosity,0.99)
+var_exp_solar$Humidity <- exp_smooth(var_exp_solar$Humidity,0.99)
+var_exp_solar$SeaLevelPressure <- exp_smooth(var_exp_solar$SeaLevelPressure,0.99)
+var_exp_solar$WindDirection <- exp_smooth(var_exp_solar$WindDirection,0.99)
+var_exp_solar$DewPoint <- exp_smooth(var_exp_solar$DewPoint,0.99)
+var_exp_solar$StationPressure <- exp_smooth(var_exp_solar$StationPressure,0.99)
+
+```
+
+Nous visualisons maintenant toutes les variables, que l'on a lissées et standardisées.
+
+```{r,echo=FALSE}
+
+data_eol <- eol
+data_solar <- solar
+
+var_eol <- filter(var_exp_eol, DateTime %in% eol$DateTime)
+var_solar <- filter(var_exp_solar, DateTime %in% solar$DateTime)
+
+max_min <- function(v){
+  return (max(v)-min(v))
+}
+
+data_eol$Eolien <- standardize(data_eol$Eolien, centerFun = min, scaleFun = max_min)
+var_eol$Temperature <- standardize(var_eol$Temperature, centerFun = min, scaleFun = max_min)
+var_eol$Humidity <- standardize(var_eol$Humidity, centerFun = min, scaleFun = max_min)
+var_eol$SeaLevelPressure <- standardize(var_eol$SeaLevelPressure, centerFun = min, scaleFun = max_min)
+var_eol$WindSpeed <- standardize(var_eol$WindSpeed, centerFun = min, scaleFun = max_min)
+var_eol$DewPoint <- standardize(var_eol$DewPoint, centerFun = min, scaleFun = max_min)
+var_eol$StationPressure <- standardize(var_eol$StationPressure, centerFun = min, scaleFun = max_min)
+var_eol$WindGust <- standardize(var_eol$WindGust, centerFun = min, scaleFun = max_min)
+
+data_solar$Solaire <- standardize(data_solar$Solaire, centerFun = min, scaleFun = max_min)
+var_solar$Temperature <- standardize(var_solar$Temperature, centerFun = min, scaleFun = max_min)
+var_solar$Nebulosity <- standardize(var_solar$Nebulosity, centerFun = min, scaleFun = max_min)
+var_solar$Humidity <- standardize(var_solar$Humidity, centerFun = min, scaleFun = max_min)
+var_solar$SeaLevelPressure <- standardize(var_solar$SeaLevelPressure, centerFun = min, scaleFun = max_min)
+var_solar$WindDirection <- standardize(var_solar$WindDirection, centerFun = min, scaleFun = max_min)
+var_solar$DewPoint <- standardize(var_solar$DewPoint, centerFun = min, scaleFun = max_min)
+var_solar$StationPressure <- standardize(var_solar$StationPressure, centerFun = min, scaleFun = max_min)
+
+data_eol <- left_join(data_eol,var_eol,by="DateTime")
+data_solar <- left_join(data_solar,var_solar,by="DateTime")
+
+```
+
+Eolien
+
+```{r,echo=FALSE}
+
+#Pour Eolien
+
+plot1 <- ggplot(data_eol,aes(x=DateTime)) +
+  geom_line(aes(y=Eolien,colour="1"),size=1) +
+  geom_line(aes(y=Temperature,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Eolien", "T"), values = c("1" = "blue", "2" = "black")) +
+  theme_classic()
+
+plot2 <- ggplot(data_eol,aes(x=DateTime)) +
+  geom_line(aes(y=Eolien,colour="1"),size=1) +
+  geom_line(aes(y=SeaLevelPressure,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Eolien", "S Pressur"), values = c("1" = "blue", "2" = "green")) +
+  theme_classic()
+
+plot3 <- ggplot(data_eol,aes(x=DateTime)) +
+  geom_line(aes(y=Eolien,colour="1"),size=1) +
+  geom_line(aes(y=Humidity,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Eolien", "Humidity"), values = c("1" = "blue", "2" = "purple")) +
+  theme_classic()
+
+plot4 <- ggplot(data_eol,aes(x=DateTime)) +
+  geom_line(aes(y=Eolien,colour="1"),size=1) +
+  geom_line(aes(y=WindGust,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Eolien", "W Gust"), values = c("1" = "blue", "2" = "grey")) +
+  theme_classic()
+
+plot5 <- ggplot(data_eol,aes(x=DateTime)) + 
+  geom_line(aes(y=Eolien,colour="1"),size=1) +
+  geom_line(aes(y=WindSpeed,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Eolien", "W Speed"), values = c("1" = "blue", "2" = "orange")) +
+  theme_classic()
+
+plot6 <- ggplot(data_eol,aes(x=DateTime)) +
+  geom_line(aes(y=Eolien,colour="1"),size=1) +
+  geom_line(aes(y=DewPoint,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Eolien", "D Point"), values = c("1" = "blue", "2" = "yellow")) +
+  theme_classic()
+
+plot7 <- ggplot(data_eol,aes(x=DateTime)) +
+  geom_line(aes(y=Eolien,colour="1"),size=1) +
+  geom_line(aes(y=StationPressure,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Eolien", "S Pressur"), values = c("1" = "blue", "2" = "red")) +
+  theme_classic()
+
+grid.arrange(plot1, plot2, plot3, plot4, plot5, plot6, plot7, ncol=2)
+
+```
+
+Solaire
+
+```{r,echo=FALSE}
+
+#Pour Solaire
+
+plot1 <- ggplot(data_solar,aes(x=DateTime)) +
+  geom_line(aes(y=Solaire,colour="1"),size=1) +
+  geom_line(aes(y=Temperature,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Solaire", "T"), values = c("1" = "blue", "2" = "black")) +
+  theme_classic()
+
+plot2 <- ggplot(data_solar,aes(x=DateTime)) +
+  geom_line(aes(y=Solaire,colour="1"),size=1) +
+  geom_line(aes(y=Nebulosity,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Solaire", "Nebulo"), values = c("1" = "blue", "2" = "green")) +
+  theme_classic()
+
+plot3 <- ggplot(data_solar,aes(x=DateTime)) +
+  geom_line(aes(y=Solaire,colour="1"),size=1) +
+  geom_line(aes(y=Humidity,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Solaire", "Humid"), values = c("1" = "blue", "2" = "purple")) +
+  theme_classic()
+
+plot4 <- ggplot(data_solar,aes(x=DateTime)) +
+  geom_line(aes(y=Solaire,colour="1"),size=1) +
+  geom_line(aes(y=SeaLevelPressure,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Solaire", "S Press"), values = c("1" = "blue", "2" = "grey")) +
+  theme_classic()
+
+plot5 <- ggplot(data_solar,aes(x=DateTime)) +
+  geom_line(aes(y=Solaire,colour="1"),size=1) +
+  geom_line(aes(y=WindDirection,colour="2"))+
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Solaire", "W Direct"), values = c("1" = "blue", "2" = "orange")) +
+  theme_classic()
+
+plot6 <- ggplot(data_solar,aes(x=DateTime)) +
+  geom_line(aes(y=Solaire,colour="1"),size=1) +
+  geom_line(aes(y=DewPoint,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Solaire", "D Point"), values = c("1" = "blue", "2" = "yellow")) +
+  theme_classic()
+
+plot7 <- ggplot(data_solar,aes(x=DateTime)) +
+  geom_line(aes(y=Solaire,colour="1"),size=1) +
+  geom_line(aes(y=StationPressure,colour="2")) +
+  scale_y_continuous(name = "Value") +
+  scale_color_manual(name = "", labels = c("Solaire", "S Press"), values = c("1" = "blue", "2" = "red")) +
+  theme_classic()
+
+grid.arrange(plot1, plot2, plot3, plot4, plot5, plot6, plot7, ncol=2)
+
+```
+
+---
+
+## Choix du modèle
+
+---
+
+Nous voulons maintenant déterminer le modèle le plus adapté pour nos données et prédire les valeurs de l'année 2020. Pour cela, nous allons choisir parmi : GBM, GLMBOOST, GAMBOOST, GAM, CART, RANDOM FOREST, NEURAL NETWORK.
+
+```{r,echo=FALSE}
+
+eq_eol <- Eolien ~ Temperature + Humidity + SeaLevelPressure + WindSpeed + DewPoint + StationPressure + WindGust
+
+eq_solar <- Solaire ~ Temperature + Nebulosity + Humidity + SeaLevelPressure + WindDirection + DewPoint + StationPressure
+
+#Gbm
+
+gbm_eol <- function(data_train,data_test) {
+  gbmexp <- gbm(formula=eq_eol, data=data_train)
+  gbmexp$forecast <- predict(gbmexp, n.trees=100, single.tree=FALSE, newdata=data_test)
+  return(gbmexp$forecast)
+}
+
+gbm_solar <- function(data_train,data_test) {
+  gbmexp <- gbm(formula=eq_solar, data=data_train)
+  gbmexp$forecast <- predict(gbmexp, n.trees=100, single.tree=FALSE, newdata=data_test)
+  return(gbmexp$forecast)
+}
+
+
+#Glmboost
+
+glmboost_eol <- function(data_train,data_test) {
+  glmexp <- glmboost(eq_eol, data=data_train)
+  glmexp$forecast <- predict(glmexp, data_test)
+  return(glmexp$forecast)
+}
+
+glmboost_solar <- function(data_train,data_test) {
+  glmexp <- glmboost(eq_solar, data=data_train)
+  glmexp$forecast <- predict(glmexp, data_test)
+  return(glmexp$forecast)
+}
+
+
+#Gamboost
+
+gamboost_eol <- function(data_train,data_test) {
+  gboostexp <- gamboost(formula=eq_eol, data=data_train)
+  gboostexp$forecast <- predict(gboostexp, data_test)
+  return(gboostexp$forecast)
+}
+
+gamboost_solar <- function(data_train,data_test) {
+  gboostexp <- gamboost(formula=eq_solar, data=data_train)
+  gboostexp$forecast <- predict(gboostexp, data_test)
+  return(gboostexp$forecast)
+}
+
+
+#Gam
+
+gam_eol <- function(data_train,data_test) {
+  gamexp <- gam(formula=eq_eol, data=data_train)
+  gamexp$forecast <- predict(gamexp, newdata=data_test)
+  return(gamexp$forecast)
+}
+
+gam_solar <- function(data_train,data_test) {
+  gamexp <- gam(formula=eq_solar, data=data_train)
+  gamexp$forecast <- predict(gamexp, newdata=data_test)
+  return(gamexp$forecast)
+}
+
+
+#Cart
+
+cart_eol <- function(data_train,data_test) {
+  cartexp <- rpart(formula=eq_eol, data=data_train %>% select(-DateTime))
+  cartexp$forecast <- predict(cartexp, data_test)
+  return(cartexp$forecast)
+}
+
+cart_solar <- function(data_train,data_test) {
+  cartexp <- rpart(formula=eq_solar, data=data_train)
+  cartexp$forecast <- predict(cartexp, data_test)
+  return(cartexp$forecast)
+}
+
+
+#Random Forest
+
+rf_eol <- function(data_train,data_test) {
+  rfexp <- ranger(formula=eq_eol, data=data_train %>% select(-DateTime))
+  rfexp$forecast <- predict(rfexp, data_test)$predictions
+  return(rfexp$forecast)
+}
+
+rf_solar <- function(data_train,data_test) {
+  rfexp <- ranger(formula=eq_solar, data=data_train)
+  rfexp$forecast <- predict(rfexp, data_test)$predictions
+  return(rfexp$forecast)
+}
+
+
+#Réseaux de neurones
+
+normalize <- function(M){
+  for (j in 1:dim(M)[2]){
+    M[,j] <- M[,j]/(max(abs(M[,j])))
+  }
+  return(M)
+}
+
+nn_eol <- function(data_train,data_test) {
+  train.x = as.matrix(data_train %>% select(-c(DateTime, Eolien)))
+  train.y = as.matrix(data_train %>% select(Eolien))
+  test.x  = as.matrix(data_test %>% select(-c(DateTime, Eolien)))
+  train.x.n <- normalize(train.x)
+  test.x.n  <- normalize(test.x)
+  m = max(abs(train.y))
+  train.y.n <- train.y/m
+  nnexp <- dbn.dnn.train(train.x.n,train.y.n)
+  nnexp$forecast <- nn.predict(nnexp, test.x.n)*m 
+  return(nnexp$forecast)
+}
+
+nn_solar <- function(data_train,data_test) {
+  train.x = as.matrix(data_train %>% select(-c(DateTime, Solaire)))
+  train.y = as.matrix(data_train %>% select(Solaire))
+  test.x  = as.matrix(data_test %>% select(-c(DateTime, Solaire)))
+  train.x.n <- normalize(train.x)
+  test.x.n  <- normalize(test.x)
+  m = max(abs(train.y))
+  train.y.n <- train.y/m
+  nnexp <- dbn.dnn.train(train.x.n,train.y.n)
+  nnexp$forecast <- nn.predict(nnexp, test.x.n)*m 
+  return(nnexp$forecast)
+}
+
+```
+
+
+
+```{r,echo=FALSE}
+
+nmae <- function(y,y_hat){
+  sum(abs(y_hat-y))/sum(abs(y))
+}
+
+
+cross_val_eol <- function(model) {
+  match.fun(model)
+  NMAE <- 0
+  for (year in c("2013","2014","2015","2016","2017","2018","2019")) {
+    date <- data_eol$DateTime[substring(data_eol$DateTime,1,4)==year]
+    data_train <- filter(data_eol,!(DateTime %in% date))
+    data_val <- filter(data_eol,DateTime %in% date)
+    y <- data_val$Eolien
+    y_hat <- model(data_train,data_val)
+    NMAE <- NMAE + nmae(y,y_hat)
+  }
+  return(NMAE)
+}
+
+cross_val_solar <- function(model) {
+  match.fun(model)
+  NMAE <- 0
+  for (year in c("2013","2014","2015","2016","2017","2018","2019")) {
+    date <- data_solar$DateTime[substring(solar$DateTime,1,4)==year]
+    data_train <- filter(data_solar,!(DateTime %in% date))
+    data_val <- filter(data_solar,DateTime %in% date)
+    y <- data_val$Solaire
+    y_hat <- model(data_train,data_val)
+    NMAE <- NMAE + nmae(y,y_hat)
+  }
+  return(NMAE)
+}
+
+```
+
+Nous effectuons une validation croisée afin de choisir le meilleur modèle. Pour cela, nous utilisons la fonction NMAE (Normalized Mean Absolute Error) comme mesure de l'erreur commise. Les résultats sont les suivants :
+
+```{r,echo=FALSE}
+
+list_models <- c("GBM", "GLMBOOST", "GAMBOOST", "GAM", "CART", "RF", "NN")
+
+df1 <- data.frame(models = list_models, nmae_eol = rep(0,7))
+
+df1$nmae_eol[df1$models=="GBM"] <- cross_val_eol(gbm_eol)
+df1$nmae_eol[df1$models=="GLMBOOST"] <- cross_val_eol(glmboost_eol)
+df1$nmae_eol[df1$models=="GAMBOOST"] <- cross_val_eol(gamboost_eol)
+df1$nmae_eol[df1$models=="GAM"] <- cross_val_eol(gam_eol)
+df1$nmae_eol[df1$models=="CART"] <- cross_val_eol(cart_eol)
+df1$nmae_eol[df1$models=="RF"] <- cross_val_eol(rf_eol)
+df1$nmae_eol[df1$models=="NN"] <- cross_val_eol(nn_eol)
+
+g_1 <- ggplot(df1,aes(x=models,y=nmae_eol,fill=models)) +
+  geom_bar(stat="identity") +
+  geom_hline(yintercept=min(df1$nmae_eol),col="black") +
+  coord_flip()
+
+df2 <- data.frame(models = list_models, rmse_solar = rep(0,7))
+
+df2$nmae_solar[df2$models=="GBM"] <- cross_val_solar(gbm_solar)
+df2$nmae_solar[df2$models=="GLMBOOST"] <- cross_val_solar(glmboost_solar)
+df2$nmae_solar[df2$models=="GAMBOOST"] <- cross_val_solar(gamboost_solar)
+df2$nmae_solar[df2$models=="GAM"] <- cross_val_solar(gam_solar)
+df2$nmae_solar[df2$models=="CART"] <- cross_val_solar(cart_solar)
+df2$nmae_solar[df2$models=="RF"] <- cross_val_solar(rf_solar)
+df2$nmae_solar[df2$models=="NN"] <- cross_val_solar(nn_solar)
+
+g_2 <- ggplot(df2,aes(x=models,y=nmae_solar,fill=models)) +
+  geom_bar(stat="identity") +
+  geom_hline(yintercept=min(df2$nmae_solar),col="black") +
+  coord_flip()
+
+grid.arrange(g_1,g_2,nrow=2)
+
+```
+
+Pour l'Eolien, le modèle GBM semble le meilleur. Pour le Solaire, c'est plutôt le modèle GLMBOOST.
+
+---
+
+## Application des modèles et analyse des résultats
+
+---
+
+```{r,echo=FALSE}
+
+#Données de train et de test
+
+complete_eol <- select(complete_data,DateTime,Eolien) %>% filter(DateTime %in% var_exp_eol$DateTime)
+complete_eol <- left_join(complete_eol,var_exp_eol,by="DateTime")
+
+complete_solar <- select(complete_data,DateTime,Solaire) %>% filter(DateTime %in% var_exp_solar$DateTime)
+complete_solar <- left_join(complete_solar,var_exp_solar,by="DateTime")
+
+#Eolien
+
+data_train_eol <- filter(complete_eol, DateTime < "2020-01-01 00:00:00 UTC")
+data_test_eol <- filter(complete_eol, DateTime >= "2020-01-01 00:00:00 UTC")
+
+#Solaire
+
+data_train_solar <- filter(complete_solar, DateTime < "2020-01-01 00:00:00 UTC")
+data_test_solar <- filter(complete_solar, DateTime >= "2020-01-01 00:00:00 UTC")
+
+```
+
+```{r,echo=FALSE}
+
+gbmexp <- gbm(formula=eq_eol, data=data_train_eol)
+gbmexp$forecast <- predict(gbmexp, n.trees=100, single.tree=FALSE, newdata=data_test_eol)
+
+nmae(data_test_eol$Eolien,gbmexp$forecast)
+
+```
+
+L'erreur NMAE est de 0.55 pour le modèle GBM dans la prédiction de l'Eolien.
+
+```{r,echo=FALSE}
+
+glmexp <- glmboost(eq_solar, data=data_train_solar)
+glmexp$forecast <- predict(glmexp, data_test_solar)
+
+nmae(data_test_solar$Solaire,glmexp$forecast)
+  
+```
+
+L'erreur NMAE est de 0.36 pour le modèle GLMBOOST dans la prédiction du Solaire.
+
+On représente maintenant graphiquement les données complètes 2013-2020 ainsi que la prédiction obtenue :
+
+```{r,echo=FALSE}
+
+#Eolien
+
+comp_eol <- select(complete_data,DateTime,Eolien)
+
+comp_eol$forecast <- rep(NA,23367)
+
+comp_eol$forecast[20452:23367] <- gbmexp$forecast
+
+g_1 <- ggplot(comp_eol,aes(x=DateTime,y=Eolien)) +
+  geom_line(aes(colour="1")) +
+  geom_line(aes(y=forecast,colour="2")) +
+  scale_y_continuous(name = "Eolien") +
+  scale_color_manual(name = "", labels = c("Donn�es", "Pr�visions"), values = c("1" = "blue", "2" = "red")) +
+  ggtitle("Donn�es r�elles et pr�dictions GBM") +
+  theme_classic()
+
+comp_eol_2 <- data_test_eol
+
+comp_eol_2$forecast <- gbmexp$forecast
+
+g_2 <- ggplot(comp_eol_2,aes(x=DateTime,y=Eolien)) +
+  geom_line(aes(colour="1")) +
+  geom_line(aes(y=forecast,colour="2")) +
+  scale_y_continuous(name = "Eolien") +
+  scale_color_manual(name = "", labels = c("Donn�es", "Pr�visions"), values = c("1" = "blue", "2" = "red")) +
+  ggtitle("Zoom ann�es 2020") +
+  theme_classic()
+
+grid.arrange(g_1,g_2,nrow=2)
+
+```
+
+```{r,echo=FALSE}
+
+#Solaire
+
+comp_solar <- select(complete_data,DateTime,Solaire)
+
+comp_solar$forecast <- rep(NA,23367)
+
+comp_solar$forecast[20452:23367] <- glmexp$forecast
+
+g_1 <- ggplot(comp_solar,aes(x=DateTime,y=Solaire)) +
+  geom_line(aes(colour="1")) +
+  geom_line(aes(y=forecast,colour="2")) +
+  scale_y_continuous(name = "Solaire") +
+  scale_color_manual(name = "", labels = c("Donn�es", "Pr�visions"), values = c("1" = "blue", "2" = "red")) +
+  ggtitle("Donn�es r�elles et pr�dictions GLMBOOST") +
+  theme_classic()
+
+comp_solar_2 <- data_test_solar
+
+comp_solar_2$forecast <- glmexp$forecast
+
+g_2 <- ggplot(comp_solar_2,aes(x=DateTime,y=Solaire)) +
+  geom_line(aes(colour="1")) +
+  geom_line(aes(y=forecast,colour="2")) +
+  scale_y_continuous(name = "Solaire") +
+  scale_color_manual(name = "", labels = c("Donn�es", "Pr�visions"), values = c("1" = "blue", "2" = "red")) +
+  ggtitle("Zoom ann�e 2020") +
+  theme_classic()
+
+grid.arrange(g_1,g_2,nrow=2)
+
+```
+
+Etude visuelle des résidus :
+
+On observe un grand biais et une petite variance, que ce soit pour l'Eolien ou le Solaire.
+
+Nos modèles n'ont donc pas permis de prédire correctement les valeurs de l'année 2020, cependant cela reste les meilleurs au vu de l'erreur NMAE.
+
+---
+
+Etude de la tendance :
+
+Eolien
+
+```{r,echo=FALSE}
+
+date <- complete_data$DateTime[substring(complete_data$DateTime,1,4)=="2013"]
+
+#Eolien
+
+inst_power_eol <- mean(complete_data$Eolien[complete_data$DateTime %in% date])
+
+tend_eol <- select(complete_data,DateTime,Eolien)
+
+tend_eol$tendance <- tend_eol$Eolien - inst_power_eol
+
+ts <- ts(tend_eol$Eolien)
+
+T <- time(ts)
+
+out.lm_1 = lm(ts ~ I(T))
+tend_1 = ts(out.lm_1$fitted, start=start(ts), frequency=frequency(ts))
+
+out.lm_2 = lm(ts ~ I(T) + I(T^2))
+tend_2 = ts(out.lm_2$fitted, start=start(ts), frequency=frequency(ts))
+
+par(mfrow=c(1,2))
+
+ts.plot(ts,tend_1,col=c("blue","red"),main="R�g poly de degr� 1",xlab="Date",ylab="Tendance")
+ts.plot(ts,tend_2,col=c("blue","red"),main="R�g poly de degr� 2",xlab="Date",ylab="Tendance")
+
+```
+
+Solaire
+
+```{r,echo=FALSE}
+
+#Solaire
+
+inst_power_solar <- mean(complete_data$Solaire[complete_data$DateTime %in% date])
+
+tend_solar <- select(complete_data,DateTime,Solaire)
+
+tend_solar$tendance <- tend_solar$Solaire - inst_power_solar
+
+ts <- ts(tend_solar$Solaire)
+T <- time(ts)
+
+out.lm_1 = lm(ts ~ I(T))
+tend_1 = ts(out.lm_1$fitted, start=start(ts), frequency=frequency(ts))
+
+out.lm_2 = lm(ts ~ I(T) + I(T^2))
+tend_2 = ts(out.lm_2$fitted, start=start(ts), frequency=frequency(ts))
+
+par(mfrow=c(1,2))
+
+ts.plot(ts,tend_1,col=c("blue","red"),main="R�g polynomiale de degr� 1",xlab="Date",ylab="Tendance")
+ts.plot(ts,tend_2,col=c("blue","red"),main="R�g polynomiale de degr� 2",xlab="Date",ylab="Tendance")
+
+```
+
+On commence par retirer la puissance moyenne de la première année à nos données (puissance installée en 2013).
+
+- Pour l'Eolien, la tendance n'est clairement pas linéaire. Une régression polynomiale d'ordre 1 n'ajuste pas bien les données. Pour ce qui est de l'ordre 2, on voit que les années 2019 et surtout 2020 montrent que la puissance installée est en forte hausse : de nombreuses nouvelles éoliennes ont sûrement été fabriquées en Ile-de-France !
+
+- Pour le Solaire, la tendance est assez linéaire. Des phénomènes météorologiques comme de fortes pluies ou nuages peuvent expliquer que la croissance était plus faible les années précédentes. Néanmoins, il est indéniable que la puissance installée augmente, et particulièrement en 2020 ! 
+
+En conclusion, au vu de l'explosion des données en 2020, il n'était pas possible de les prédire avec fiabilité, d'autant plus que ce sont des données de consommation fortement liées aux aléas météorologiques qui ne sont pas prévisibles à long terme.
+
+
+## Aggregation d'experts
+
+````{r, echo = FALSE}
+
+experts <- cbind(gbmexp$forecast,
+glmexp$forecast,
+gboostexp$forecast,
+gamexp$forecast,
+rfexp$forecast,
+nnexp$forecast)
+
+colnames(experts)<-c("gbm",
+"glm",
+"gamboost",
+"gam",
+"rf",
+"nn")
+dim(experts)
+
+##
+library(opera)
+agg.online<- mixture(Y=data_test$Consumption,experts=experts)
+summary(agg.online)
+plot(agg.online, pause=F)
+
+
+````
+
+
